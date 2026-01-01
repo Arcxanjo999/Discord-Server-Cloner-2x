@@ -1,63 +1,77 @@
 import type { Emoji, Guild, Role, VoiceChannel } from 'discord.js-selfbot-v13';
 import gradient from 'gradient-string';
-import type { BackupData, CategoryData, LoadOptions, TextChannelData, VoiceChannelData } from './types';
-import { loadCategory, loadChannel } from './util';
-import {t} from '../utils/func'
+import type {
+    BackupData,
+    CategoryData,
+    LoadOptions,
+    TextChannelData,
+    VoiceChannelData
+} from './types';
+
+import util from './util';
+import { t } from '../utils/func';
+
 /**
  * Restores the guild configuration
  */
 export const loadConfig = (guild: Guild, backupData: BackupData): Promise<Guild[]> => {
     const configPromises: Promise<Guild>[] = [];
-    if (backupData.name) {
-        configPromises.push(guild.setName(backupData.name));
-    }
+
+    if (backupData.name) configPromises.push(guild.setName(backupData.name));
     if (backupData.iconBase64) {
         configPromises.push(guild.setIcon(Buffer.from(backupData.iconBase64, 'base64')));
     } else if (backupData.iconURL) {
         configPromises.push(guild.setIcon(backupData.iconURL));
     }
+
     if (backupData.splashBase64) {
         configPromises.push(guild.setSplash(Buffer.from(backupData.splashBase64, 'base64')));
     } else if (backupData.splashURL) {
         configPromises.push(guild.setSplash(backupData.splashURL));
     }
+
     if (backupData.bannerBase64) {
         configPromises.push(guild.setBanner(Buffer.from(backupData.bannerBase64, 'base64')));
     } else if (backupData.bannerURL) {
         configPromises.push(guild.setBanner(backupData.bannerURL));
     }
+
     if (backupData.verificationLevel) {
         configPromises.push(guild.setVerificationLevel(backupData.verificationLevel));
     }
+
     if (backupData.defaultMessageNotifications) {
-        configPromises.push(guild.setDefaultMessageNotifications(backupData.defaultMessageNotifications));
+        configPromises.push(
+            guild.setDefaultMessageNotifications(backupData.defaultMessageNotifications)
+        );
     }
-    const changeableExplicitLevel = guild.features.includes('COMMUNITY');
-    if (backupData.explicitContentFilter && changeableExplicitLevel) {
-        configPromises.push(guild.setExplicitContentFilter(backupData.explicitContentFilter));
+
+    const canChangeExplicit = guild.features.includes('COMMUNITY');
+    if (backupData.explicitContentFilter && canChangeExplicit) {
+        configPromises.push(
+            guild.setExplicitContentFilter(backupData.explicitContentFilter)
+        );
     }
+
     return Promise.all(configPromises);
 };
 
 /**
- * Restore the guild roles
+ * Restore roles
  */
 export const loadRoles = async (guild: Guild, backupData: BackupData): Promise<Role[]> => {
     const rolePromises: Promise<Role>[] = [];
-    
+
     backupData.roles.forEach((roleData) => {
         if (roleData.isEveryone) {
-            const everyoneRole = guild.roles.cache.get(guild.id);
-            
-            if (everyoneRole) {
+            const everyone = guild.roles.cache.get(guild.id);
+            if (everyone) {
                 rolePromises.push(
-                    everyoneRole.edit({
+                    everyone.edit({
                         name: roleData.name,
                         color: roleData.color,
                         permissions: BigInt(roleData.permissions),
                         mentionable: roleData.mentionable
-                    }).then((editedRole) => {
-                        return editedRole;
                     })
                 );
             }
@@ -69,118 +83,133 @@ export const loadRoles = async (guild: Guild, backupData: BackupData): Promise<R
                     hoist: roleData.hoist,
                     permissions: BigInt(roleData.permissions),
                     mentionable: roleData.mentionable
-                }).then((createdRole) => {
-                    console.log(gradient(['#ffcc00', '#0099cc', '#9933cc'])(t('rolecreate') + createdRole.name));
-                    return createdRole;
+                }).then((role) => {
+                    console.log(
+                        gradient(['#ffcc00', '#0099cc', '#9933cc'])(
+                            t('rolecreate') + role.name
+                        )
+                    );
+                    return role;
                 })
             );
         }
     });
-    
+
     return Promise.all(rolePromises);
 };
 
-
 /**
- * Restore the guild channels
+ * Restore channels
  */
-export const loadChannels = async (guild: Guild, backupData: BackupData, options: LoadOptions): Promise<unknown[]> => {
-    const loadChannelPromises: Promise<void | unknown>[] = [];
-    backupData.channels.categories.forEach((categoryData: CategoryData) => {
-        
-        loadChannelPromises.push(
-            new Promise(async (resolve) => {
+export const loadChannels = async (
+    guild: Guild,
+    backupData: BackupData,
+    options: LoadOptions
+): Promise<unknown[]> => {
+    const tasks: Promise<unknown>[] = [];
+
+    for (const categoryData of backupData.channels.categories) {
+        tasks.push(
+            (async () => {
                 try {
-                    const createdCategory = await loadCategory(categoryData, guild);
-                    console.log(gradient(['#ff4500', '#ffa500', '#ff6347'])(t('categorycreate') + createdCategory.name));
-                    await Promise.all(categoryData.children.map(async (channelData: TextChannelData | VoiceChannelData) => {
+                    const category = await util.loadCategory(categoryData, guild);
+                    console.log(
+                        gradient(['#ff4500', '#ffa500', '#ff6347'])(
+                            t('categorycreate') + category.name
+                        )
+                    );
+
+                    for (const channelData of categoryData.children) {
                         try {
-                            await loadChannel(channelData, guild, createdCategory, options);
-                            console.log(gradient(['#43a1ff', '#8a3ffc', '#3c0080'])(t('voicechannelcreate') + channelData.name));
-                        } catch (error) {
-                            console.error(`Error loading channel ${channelData.name}:`, error);
+                            await util.loadChannel(channelData, guild, category, options);
+                        } catch (err) {
+                            console.error(`Error loading channel ${channelData.name}:`, err);
                         }
-                    }));
-                    resolve(true);
-                } catch (error) {
-                    console.error(`Error loading category ${categoryData.name}:`, error);
-                    resolve(false);
+                    }
+                } catch (err) {
+                    console.error(`Error loading category ${categoryData.name}:`, err);
                 }
-            })
+            })()
         );
-    });
+    }
 
-    backupData.channels.others.forEach((channelData: TextChannelData | VoiceChannelData) => {
-        loadChannelPromises.push(
-            new Promise(async (resolve) => {
+    for (const channelData of backupData.channels.others) {
+        tasks.push(
+            (async () => {
                 try {
-                    await loadChannel(channelData, guild, null, options);
-                } catch (error) {
-                    console.error(`Error loading other channel ${channelData.name}:`, error);
+                    await util.loadChannel(channelData, guild, null, options);
+                } catch (err) {
+                    console.error(
+                        `Error loading other channel ${channelData.name}:`,
+                        err
+                    );
                 }
-                resolve(true);
-            })
+            })()
         );
-    });
+    }
 
-    return Promise.all(loadChannelPromises);
+    return Promise.all(tasks);
 };
 
 /**
- * Restore the afk configuration
+ * Restore AFK
  */
 export const loadAFK = (guild: Guild, backupData: BackupData): Promise<Guild[]> => {
-    const afkPromises: Promise<Guild>[] = [];
+    const tasks: Promise<Guild>[] = [];
+
     if (backupData.afk) {
-        afkPromises.push(guild.setAFKChannel(guild.channels.cache.find((ch) => ch.name === backupData.afk.name && ch.type === 'GUILD_VOICE') as VoiceChannel));
-        afkPromises.push(guild.setAFKTimeout(backupData.afk.timeout));
+        const afkChannel = guild.channels.cache.find(
+            (ch) =>
+                ch.name === backupData.afk.name &&
+                ch.type === 'GUILD_VOICE'
+        ) as VoiceChannel;
+
+        if (afkChannel) {
+            tasks.push(guild.setAFKChannel(afkChannel));
+            tasks.push(guild.setAFKTimeout(backupData.afk.timeout));
+        }
     }
-    return Promise.all(afkPromises);
+
+    return Promise.all(tasks);
 };
 
 /**
- * Restore guild emojis
+ * Restore emojis
  */
 export const loadEmojis = (guild: Guild, backupData: BackupData): Promise<Emoji[]> => {
     const emojiPromises: Promise<Emoji>[] = [];
-    backupData.emojis.forEach((emoji) => {
+
+    for (const emoji of backupData.emojis) {
         if (emoji.url) {
             emojiPromises.push(guild.emojis.create(emoji.url, emoji.name));
-            console.log(gradient(["#ff4500", "#ffa500", "#ff6347"])(t('emojicreate') + emoji.url + ', ' + emoji.name));
         } else if (emoji.base64) {
-            emojiPromises.push(guild.emojis.create(Buffer.from(emoji.base64, 'base64'), emoji.name));
-            console.log(gradient(["#ff4500", "#ffa500", "#ff6347"])(`Emoji criado com base64, Nome: ${emoji.name}`));
+            emojiPromises.push(
+                guild.emojis.create(
+                    Buffer.from(emoji.base64, 'base64'),
+                    emoji.name
+                )
+            );
         }
-    });
+    }
+
     return Promise.all(emojiPromises);
-};
-/**
- * Restore guild bans
- */
-export const loadBans = (guild: Guild, backupData: BackupData): Promise<string[]> => {
-    const banPromises: Promise<string>[] = [];
-    backupData.bans.forEach((ban) => {
-        banPromises.push(
-            guild.members.ban(ban.id, {
-                reason: ban.reason
-            }) as Promise<string> 
-        );
-    });
-    return Promise.all(banPromises);
 };
 
 /**
- * Restore embedChannel configuration
+ * Restore widget
  */
-export const loadEmbedChannel = (guild: Guild, backupData: BackupData): Promise<Guild[]> => {
-    const embedChannelPromises: Promise<Guild>[] = [];
-    if (backupData.widget.channel) {
-        embedChannelPromises.push(
-            guild.setWidgetSettings({
-                enabled: backupData.widget.enabled,
-                channel: guild.channels.cache.find((ch) => ch.name === backupData.widget.channel)
-            })
-        );
-    } 
-    return Promise.all(embedChannelPromises);
+export const loadEmbedChannel = (
+    guild: Guild,
+    backupData: BackupData
+): Promise<Guild[]> => {
+    if (!backupData.widget?.channel) return Promise.resolve([]);
+
+    return Promise.all([
+        guild.setWidgetSettings({
+            enabled: backupData.widget.enabled,
+            channel: guild.channels.cache.find(
+                (ch) => ch.name === backupData.widget.channel
+            )
+        })
+    ]);
 };

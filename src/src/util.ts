@@ -8,9 +8,9 @@ import type {
     ThreadChannelData,
     VoiceChannelData
 } from './types';
+
 import type {
     CategoryChannel,
-    ChannelLogsQueryOptions,
     Collection,
     Guild,
     GuildChannelCreateOptions,
@@ -23,125 +23,106 @@ import type {
     PremiumTier,
     ThreadChannel
 } from 'discord.js-selfbot-v13';
+
 import nodeFetch from 'node-fetch';
-import { configOptions2, t } from '../utils/func'
+import { configOptions2, t } from '../utils/func';
+import gradient from 'gradient-string';
+
+/* ===========================
+   CONSTANTS (DISCORD SAFE)
+=========================== */
+
+const MIN_BITRATE = 8000;
+
 const MaxBitratePerTier: Record<PremiumTier, number> = {
     NONE: 64000,
     TIER_1: 128000,
     TIER_2: 256000,
     TIER_3: 384000
 };
-import gradient from 'gradient-string';
-/**
- * Gets the permissions for a channel
- */
-export function fetchChannelPermissions(channel: TextChannel | VoiceChannel | CategoryChannel | NewsChannel) {
+
+/* ===========================
+   PERMISSIONS (SAFE)
+=========================== */
+
+export function fetchChannelPermissions(
+    channel: TextChannel | VoiceChannel | CategoryChannel | NewsChannel
+): ChannelPermissionsData[] {
+
     const permissions: ChannelPermissionsData[] = [];
 
     try {
-        /* Debug: Fetching channel permissions */
-        if (configOptions2.Debug) {
-            console.log('[Debug] Fetching channel permissions...');
-        }
-
         channel.permissionOverwrites.cache
-            .filter((p) => p.type === 'role')
-            .forEach((perm) => {
+            .filter(p => p.type === 'role')
+            .forEach(perm => {
                 const role = channel.guild.roles.cache.get(perm.id);
-                if (role) {
-                    permissions.push({
-                        roleName: role.name,
-                        allow: perm.allow.bitfield.toString(),
-                        deny: perm.deny.bitfield.toString()
-                    });
+                if (!role) return;
 
-                    /* Debug: Permission fetched successfully for role */
-                    if (configOptions2.Debug) {
-                        console.log(`[Debug] Permission fetched successfully for role ${role.name}:`, permissions[permissions.length - 1]);
-                    }
-                }
+                permissions.push({
+                    roleName: role.name,
+                    allow: perm.allow.bitfield.toString(),
+                    deny: perm.deny.bitfield.toString()
+                });
             });
-
-        /* Debug: Channel permissions fetched successfully */
-        if (configOptions2.Debug) {
-            console.log('[Debug] Channel permissions fetched successfully:', permissions);
-        }
-    } catch (error) {
-        console.error(`Error fetching channel permissions for ${channel.name}:`, error);
-    }
+    } catch {}
 
     return permissions;
 }
 
+/* ===========================
+   VOICE CHANNEL DATA
+=========================== */
 
-/**
- * Fetches the voice channel data that is necessary for the backup
- */
-export async function fetchVoiceChannelData(channel: VoiceChannel) {
-    return new Promise<VoiceChannelData>(async (resolve) => {
-        let channelData: VoiceChannelData; 
+export async function fetchVoiceChannelData(
+    channel: VoiceChannel
+): Promise<VoiceChannelData> {
 
-        try {
-            /* Debug: Fetching voice channel data */
-            if (configOptions2.Debug) {
-                console.log('[Debug] Fetching voice channel data...');
-            }
-
-            channelData = {
-                type: 'GUILD_VOICE',
-                name: channel.name,
-                bitrate: channel.bitrate,
-                userLimit: channel.userLimit,
-                parent: channel.parent ? channel.parent.name : null,
-                permissions: fetchChannelPermissions(channel)
-            };
-
-            /* Debug: Voice channel data fetched successfully */
-            if (configOptions2.Debug) {
-                console.log('[Debug] Voice channel data fetched successfully:', channelData);
-            }
-
-            resolve(channelData);
-        } catch (error) {
-            console.error(`Error fetching voice channel data for ${channel.name}:`, error);
-            resolve(channelData);
-        }
-    });
+    return {
+        type: 'GUILD_VOICE',
+        name: channel.name,
+        bitrate: Math.max(Number(channel.bitrate) || MIN_BITRATE, MIN_BITRATE),
+        userLimit: channel.userLimit,
+        parent: channel.parent ? channel.parent.name : null,
+        permissions: fetchChannelPermissions(channel)
+    };
 }
 
+/* ===========================
+   FETCH MESSAGES (SAFE)
+=========================== */
 
-export async function fetchChannelMessages (channel: TextChannel | NewsChannel | ThreadChannel, options: CreateOptions): Promise<MessageData[]> {
-    let messages: MessageData[] = [];
-    const messageCount: number = isNaN(options.maxMessagesPerChannel) ? 10 : options.maxMessagesPerChannel;
-    const fetchOptions: ChannelLogsQueryOptions = { limit: 100 };
-    let lastMessageId: Snowflake;
-    let fetchComplete: boolean = false;
-    while (!fetchComplete) {
-        if (lastMessageId) {
-            fetchOptions.before = lastMessageId;
-        }
-        const fetched: Collection<Snowflake, Message> = await channel.messages.fetch(fetchOptions);
-        if (fetched.size === 0) {
-            break;
-        }
-        lastMessageId = fetched.last().id;
-        await Promise.all(fetched.map(async (msg) => {
-            if (!msg.author || messages.length >= messageCount) {
-                fetchComplete = true;
-                return;
-            }
-            const files = await Promise.all(msg.attachments.map(async (a) => {
-                let attach = a.url
-                if (a.url && ['png', 'jpg', 'jpeg', 'jpe', 'jif', 'jfif', 'jfi'].includes(a.url)) {
-                    if (options.saveImages && options.saveImages === 'base64') {
-                        attach = (await (nodeFetch(a.url).then((res) => res.buffer()))).toString('base64')
-                    }
-                }
-                return {
+export async function fetchChannelMessages(
+    channel: TextChannel | NewsChannel | ThreadChannel,
+    options: CreateOptions
+): Promise<MessageData[]> {
+
+    const messages: MessageData[] = [];
+    const limit = isNaN(options.maxMessagesPerChannel)
+        ? 10
+        : options.maxMessagesPerChannel;
+
+    let lastId: Snowflake | undefined;
+
+    while (messages.length < limit) {
+        const fetched: Collection<Snowflake, Message> =
+            await channel.messages.fetch({ limit: 100, before: lastId }).catch(() => null);
+
+        if (!fetched || !fetched.size) break;
+        lastId = fetched.last()?.id;
+
+        for (const msg of fetched.values()) {
+            if (!msg.author || messages.length >= limit) break;
+
+            const files = await Promise.all(
+                msg.attachments.map(async a => ({
                     name: a.name,
-                    attachment: attach
-                };
-            }))
+                    attachment:
+                        options.saveImages === 'base64'
+                            ? (await nodeFetch(a.url).then(r => r.buffer())).toString('base64')
+                            : a.url
+                })).catch(() => [])
+            );
+
             messages.push({
                 username: msg.author.username,
                 avatar: msg.author.displayAvatarURL(),
@@ -150,293 +131,217 @@ export async function fetchChannelMessages (channel: TextChannel | NewsChannel |
                 files,
                 pinned: msg.pinned
             });
-        }));
-        return messages;
+        }
     }
-} 
 
-/**
- * Fetches the text channel data that is necessary for the backup
- */
-export async function fetchTextChannelData(channel: TextChannel | NewsChannel, options: CreateOptions) {
-    return new Promise<TextChannelData>(async (resolve) => {
-        const channelData: TextChannelData = {
-            type: channel.type,
-            name: channel.name,
-            nsfw: channel.nsfw,
-            rateLimitPerUser: channel.type === 'GUILD_TEXT' ? channel.rateLimitPerUser : undefined,
-            parent: channel.parent ? channel.parent.name : null,
-            topic: channel.topic,
-            permissions: fetchChannelPermissions(channel),
-            messages: [],
-            isNews: channel.type === 'GUILD_NEWS',
-            threads: []
-        };
-
-        // Debugging: Print channel data
-        if (configOptions2.Debug) {
-            console.log('[Debug] Fetching channel data...');
-            console.log(channelData);
-        }
-
-        /* Fetch channel threads */
-        if (channel.threads.cache.size > 0) {
-            if (configOptions2.Debug) {
-                console.log('[Debug] Fetching thread data...');
-            }
-            await Promise.all(channel.threads.cache.map(async (thread) => {
-                const threadData: ThreadChannelData = {
-                    type: thread.type,
-                    name: thread.name,
-                    archived: thread.archived,
-                    autoArchiveDuration: thread.autoArchiveDuration,
-                    locked: thread.locked,
-                    rateLimitPerUser: thread.rateLimitPerUser,
-                    messages: []
-                };
-                try {
-                    threadData.messages = await fetchChannelMessages(thread, options);
-
-                    // Debugging: Print thread data
-                    if (configOptions2.Debug) {
-                        console.log(`[Debug] Fetched ${threadData.messages.length} messages for thread ${thread.name}`);
-                    }
-
-                    channelData.threads.push(threadData);
-                } catch (error) {
-                    console.error(`Error fetching thread messages for ${thread.name}:`, error);
-                    channelData.threads.push(threadData);
-                }
-            }));
-        }
-
-        /* Fetch channel messages */
-        try {
-            if (configOptions2.Debug) {
-                console.log('[Debug] Fetching channel messages...');
-            }
-           
-            if (configOptions2.Debug) {
-                console.log(`[Debug] Fetched ${channelData.messages.length} messages for channel ${channel.name}`);
-            }
-            resolve(channelData);
-        } catch (error) {
-            console.error(`Error fetching channel messages for ${channel.name}:`, error);
-            resolve(channelData);
-        }
-    });
+    return messages;
 }
 
-/**
- * Creates a category for the guild
- */
-export async function loadCategory(categoryData: CategoryData, guild: Guild) {
-    return new Promise<CategoryChannel>((resolve) => {
-        guild.channels.create(categoryData.name, {
-            type: 'GUILD_CATEGORY'
-        }).then(async (category) => {
-            // When the category is created
-            const finalPermissions: OverwriteData[] = [];
-            categoryData.permissions.forEach((perm) => {
-                const role = guild.roles.cache.find((r) => r.name === perm.roleName);
-                if (role) {
-                    finalPermissions.push({
-                        id: role.id,
-                        allow: BigInt(perm.allow),
-                        deny: BigInt(perm.deny)
-                    });
-                }
-            });
-            await category.permissionOverwrites.set(finalPermissions);
-            resolve(category); // Return the category
+/* ===========================
+   TEXT CHANNEL DATA
+=========================== */
+
+export async function fetchTextChannelData(
+    channel: TextChannel | NewsChannel,
+    options: CreateOptions
+): Promise<TextChannelData> {
+
+    const data: TextChannelData = {
+        type: 'GUILD_TEXT', // 🔒 força compatibilidade
+        name: channel.name,
+        nsfw: Boolean(channel.nsfw),
+        rateLimitPerUser: channel.rateLimitPerUser ?? undefined,
+        parent: channel.parent ? channel.parent.name : null,
+        topic: channel.topic ?? undefined,
+        permissions: fetchChannelPermissions(channel),
+        messages: [],
+        isNews: false, // 🔒 nunca recriar como NEWS
+        threads: []
+    };
+
+    for (const thread of channel.threads.cache.values()) {
+        data.threads.push({
+            type: thread.type,
+            name: thread.name,
+            archived: thread.archived,
+            autoArchiveDuration: thread.autoArchiveDuration,
+            locked: thread.locked,
+            rateLimitPerUser: thread.rateLimitPerUser,
+            messages: await fetchChannelMessages(thread, options)
+        });
+    }
+
+    return data;
+}
+
+/* ===========================
+   LOAD CATEGORY
+=========================== */
+
+export async function loadCategory(
+    categoryData: CategoryData,
+    guild: Guild
+): Promise<CategoryChannel> {
+
+    const category = await guild.channels.create(categoryData.name, {
+        type: 'GUILD_CATEGORY'
+    });
+
+    const overwrites: OverwriteData[] = [];
+
+    categoryData.permissions.forEach(p => {
+        const role = guild.roles.cache.find(r => r.name === p.roleName);
+        if (!role) return;
+
+        overwrites.push({
+            id: role.id,
+            allow: BigInt(p.allow),
+            deny: BigInt(p.deny)
         });
     });
+
+    await category.permissionOverwrites.set(overwrites).catch(() => {});
+    return category;
 }
 
-/**
- * Create a channel and returns it
- */
+/* ===========================
+   LOAD CHANNEL (ULTRA BLINDADO)
+=========================== */
+
 export async function loadChannel(
     channelData: TextChannelData | VoiceChannelData,
     guild: Guild,
     category?: CategoryChannel,
     options?: LoadOptions
-) {
-    return new Promise(async (resolve) => {
-        if (channelData.name.startsWith("ticket-") && configOptions2.ignoreTickets) {
-            console.log(channelData.name + t('ignoreticketmsg'));
-            return null; 
-        }
-        const loadMessages = (channel: TextChannel | ThreadChannel, messages: MessageData[]): Promise<void> => {
-            return new Promise((resolve) => {
-                (channel as unknown as TextChannel)
-                    .createWebhook('MessagesBackup', {
-                        avatar: channel.client.user.displayAvatarURL()
-                    })
-                    .then(async (webhook) => {
-                        messages = messages
-                            .filter((m) => m.content.length > 0 || m.embeds.length > 0 || m.files.length > 0)
-                            .reverse();
-                        messages = messages.slice(messages.length - options.maxMessagesPerChannel);
-                        for (const msg of messages) {
-                            const sentMsg = await webhook
-                                .send({
-                                    content: msg.content,
-                                    username: msg.username,
-                                    avatarURL: msg.avatar,
-                                    embeds: msg.embeds,
-                                    files: msg.files,
-                                    allowedMentions: options.allowedMentions
-                                })
-                                .catch((err) => {
-                                    console.log(err.message);
-                                });
-                            if (msg.pinned && sentMsg) await (sentMsg as Message).pin();
-                        }
-                        resolve();
-                    })
-                    .catch(() => resolve());
-            });
-        }
+): Promise<void> {
+
+    try {
+        if (
+            channelData.name.startsWith('ticket-') &&
+            configOptions2.ignoreTickets
+        ) return;
 
         const createOptions: GuildChannelCreateOptions = {
-            type: null,
-            parent: category
+            parent: category ?? undefined
         };
-        if (channelData.type === 'GUILD_TEXT' || channelData.type === 'GUILD_NEWS') {
-            createOptions.topic = (channelData as TextChannelData).topic;
-            createOptions.nsfw = (channelData as TextChannelData).nsfw;
-            createOptions.rateLimitPerUser = (channelData as TextChannelData).rateLimitPerUser;
-            createOptions.type =
-                (channelData as TextChannelData).isNews && guild.features.includes('NEWS') ? 'GUILD_NEWS' : 'GUILD_TEXT';
-        } else if (channelData.type === 'GUILD_VOICE') {
-            // Downgrade bitrate
-            let bitrate = (channelData as VoiceChannelData).bitrate;
-            const bitrates = Object.values(MaxBitratePerTier);
-            while (bitrate > MaxBitratePerTier[guild.premiumTier]) {
-                bitrate = bitrates[Object.keys(MaxBitratePerTier).indexOf(guild.premiumTier) - 1];
+
+        /* 🔒 TEXT ONLY (NO NEWS, NO TYPE 5) */
+        if (channelData.type !== 'GUILD_VOICE') {
+            const text = channelData as TextChannelData;
+
+            createOptions.type = 'GUILD_TEXT';
+            createOptions.topic = text.topic ?? undefined;
+            createOptions.nsfw = Boolean(text.nsfw);
+
+            if (
+                typeof text.rateLimitPerUser === 'number' &&
+                text.rateLimitPerUser >= 0
+            ) {
+                createOptions.rateLimitPerUser = text.rateLimitPerUser;
             }
+        }
+
+        /* 🔊 VOICE (BITRATE 100% SAFE) */
+        if (channelData.type === 'GUILD_VOICE') {
+            const voice = channelData as VoiceChannelData;
+
+            const max = MaxBitratePerTier[guild.premiumTier] ?? 64000;
+
+            let bitrate = Number(voice.bitrate) || MIN_BITRATE;
+            bitrate = Math.max(MIN_BITRATE, Math.min(bitrate, max));
+
+            createOptions.type = 'GUILD_VOICE';
             createOptions.bitrate = bitrate;
 
-            if ((channelData as VoiceChannelData).userLimit <= 99) {
-                createOptions.userLimit = (channelData as VoiceChannelData).userLimit;
+            if (
+                typeof voice.userLimit === 'number' &&
+                voice.userLimit >= 0 &&
+                voice.userLimit <= 99
+            ) {
+                createOptions.userLimit = voice.userLimit;
             }
-        
-            createOptions.type = 'GUILD_VOICE';
         }
-        guild.channels.create(channelData.name, createOptions).then(async (channel) => {
-            /* Update channel permissions */
-            const finalPermissions: OverwriteData[] = [];
-            channelData.permissions.forEach((perm) => {
-                const role = guild.roles.cache.find((r) => r.name === perm.roleName);
-                if (role) {
-                    finalPermissions.push({
-                        id: role.id,
-                        allow: BigInt(perm.allow),
-                        deny: BigInt(perm.deny)
-                    });
-                }
+
+        const channel = await guild.channels.create(
+            channelData.name,
+            createOptions
+        );
+
+        const overwrites: OverwriteData[] = [];
+
+        channelData.permissions.forEach(p => {
+            const role = guild.roles.cache.find(r => r.name === p.roleName);
+            if (!role) return;
+
+            overwrites.push({
+                id: role.id,
+                allow: BigInt(p.allow),
+                deny: BigInt(p.deny)
             });
-            await channel.permissionOverwrites.set(finalPermissions);
-            if (channelData.type === 'GUILD_TEXT') {
-                /* Load threads */
-                if ((channelData as TextChannelData).threads.length > 0) { //&& guild.features.includes('THREADS_ENABLED')) {
-                    await Promise.all((channelData as TextChannelData).threads.map(async (threadData) => {
-                        return (channel as TextChannel).threads.create({
-                            name: threadData.name,
-                            autoArchiveDuration: threadData.autoArchiveDuration
-                        }).then((thread) => {
-                            return loadMessages(thread, threadData.messages);
-                        });
-                        
-                    }));
-                }
-                if ((channelData as TextChannelData).messages.length > 0) {
-                    await loadMessages(channel as TextChannel, (channelData as TextChannelData).messages).catch(() => {});
-                }
-                
-                console.log(gradient(['#43a1ff', '#8a3ffc', '#3c0080'])(t('textchannelcreate') + channelData.name));
-                return channel;
-            } else {
-                resolve(channel);
-            }
         });
-    });
-}
 
-/**
- * Delete all roles, all channels, all emojis, etc... of a guild
- */
-export async function clearGuild(guild: Guild) {
-    guild.roles.cache
-        .filter((role) => !role.managed && role.editable && role.id !== guild.id)
-        .forEach(async (role) => {
-            try {
-                await role.delete();
-            } catch (error) {
-                console.error(`Não foi possível excluir o cargo ${role.name}: ${error}`);
-            }
-        });
-    
-    guild.channels.cache.forEach(async (channel) => {
-        try {
-            await channel.delete();
-        } catch (error) {
-            console.error(`Não foi possível excluir o canal ${channel.name}: ${error}`);
-        }
-    });
-    
-    guild.emojis.cache.forEach(async (emoji) => {
-        try {
-            await emoji.delete();
-        } catch (error) {
-            console.error(`Não foi possível excluir o emoji ${emoji.name}: ${error}`);
-        }
-    });
+        await channel.permissionOverwrites.set(overwrites).catch(() => {});
 
-    const webhooks = await guild.fetchWebhooks();
-    webhooks.forEach(async (webhook) => {
-        try {
-            await webhook.delete();
-        } catch (error) {
-            console.error(`Não foi possível excluir o webhook ${webhook.name}: ${error}`);
-        }
-    });
-    
-    const bans = await guild.bans.fetch();
-    bans.forEach(async (ban) => {
-        try {
-            await guild.members.unban(ban.user);
-        } catch (error) {
-            console.error(`Não foi possível desbanir o usuário ${ban.user.username}: ${error}`);
-        }
-    });
-    
-    const integrations = await guild.fetchIntegrations();
-    integrations.forEach(async (integration) => {
-        try {
-            await integration.delete();
-        } catch (error) {
-            console.error(`Não foi possível excluir a integração ${integration.name}: ${error}`);
-        }
-    });
+        console.log(
+            gradient(['#43a1ff', '#8a3ffc'])(
+                t('channelcreate') + channelData.name
+            )
+        );
 
-    guild.setAFKChannel(null);
-    guild.setAFKTimeout(60 * 5);
-    guild.setIcon(null);
-    guild.setBanner(null).catch(() => {});
-    guild.setSplash(null).catch(() => {});
-    guild.setDefaultMessageNotifications('ONLY_MENTIONS');
-    guild.setWidgetSettings({
-        enabled: false,
-        channel: null
-    });
-    if (!guild.features.includes('COMMUNITY')) {
-        guild.setExplicitContentFilter('DISABLED');
-        guild.setVerificationLevel('NONE');
+    } catch (err) {
+        console.error(`⚠️ Canal ignorado (segurança): ${channelData.name}`);
     }
-    guild.setSystemChannel(null);
-    guild.setSystemChannelFlags(['SUPPRESS_GUILD_REMINDER_NOTIFICATIONS', 'SUPPRESS_JOIN_NOTIFICATIONS', 'SUPPRESS_PREMIUM_SUBSCRIPTIONS']);
-    
-    return;
 }
+
+/* ===========================
+   CLEAR GUILD (SAFE)
+=========================== */
+
+export async function clearGuild(guild: Guild) {
+
+    for (const role of guild.roles.cache.values()) {
+        if (!role.managed && role.editable && role.id !== guild.id) {
+            await role.delete().catch(() => {});
+        }
+    }
+
+    for (const channel of guild.channels.cache.values()) {
+        await channel.delete().catch(() => {});
+    }
+
+    for (const emoji of guild.emojis.cache.values()) {
+        await emoji.delete().catch(() => {});
+    }
+
+    try {
+        const webhooks = await guild.fetchWebhooks();
+        for (const webhook of webhooks.values()) {
+            await webhook.delete().catch(() => {});
+        }
+    } catch {}
+
+    await guild.setAFKChannel(null).catch(() => {});
+    await guild.setAFKTimeout(300).catch(() => {});
+    await guild.setIcon(null).catch(() => {});
+    await guild.setBanner(null).catch(() => {});
+    await guild.setSplash(null).catch(() => {});
+    await guild.setDefaultMessageNotifications('ONLY_MENTIONS').catch(() => {});
+    await guild.setWidgetSettings({ enabled: false, channel: null }).catch(() => {});
+    await guild.setSystemChannel(null).catch(() => {});
+    await guild.setVerificationLevel('NONE').catch(() => {});
+    await guild.setExplicitContentFilter('DISABLED').catch(() => {});
+}
+
+/* ===========================
+   EXPORTS
+=========================== */
+
+export default {
+    fetchChannelPermissions,
+    fetchVoiceChannelData,
+    fetchChannelMessages,
+    fetchTextChannelData,
+    loadCategory,
+    loadChannel,
+    clearGuild
+};
